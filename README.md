@@ -6,3 +6,8 @@ Srart from:
 ```
 git clone https://github.com/simsim314/NeuralEdits.git
 ```
+
+Or
+```
+!git clone https://github.com/simsim314/NeuralEdits.git
+```
