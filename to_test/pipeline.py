@@ -381,7 +381,7 @@ class Zero123PlusPipeline(diffusers.StableDiffusionPipeline):
         if hasattr(self.unet, "controlnet"):
             cak['control_depth'] = depth_image
         
-        return encoder_hidden_states, cak
+        return cond_lat, encoder_hidden_states, cak
     
     @torch.no_grad()
     def __call__(
@@ -400,7 +400,7 @@ class Zero123PlusPipeline(diffusers.StableDiffusionPipeline):
         **kwargs
     ):
         self.prepare()
-        encoder_hidden_states, cak = self.prepare_unet_input(
+        _, encoder_hidden_states, cak = self.prepare_unet_input(
             image, depth_image, prompt, num_images_per_prompt, guidance_scale
         )
         
@@ -432,7 +432,6 @@ class Zero123PlusPipeline(diffusers.StableDiffusionPipeline):
         
         return ImagePipelineOutput(images=image)
 
-
     @torch.no_grad()
     def generate(
         self,
@@ -450,16 +449,35 @@ class Zero123PlusPipeline(diffusers.StableDiffusionPipeline):
         **kwargs
     ):
         self.prepare()
-        encoder_hidden_states, cak = self.prepare_unet_input(
+        latents, encoder_hidden_states, cak = self.prepare_unet_input(
             image, depth_image, prompt, num_images_per_prompt, guidance_scale
         )
         
         self.scheduler.set_timesteps(num_inference_steps)
         latents = torch.randn_like(latents)
-
+        
         zeros = encoder_hidden_states * 0
         encoder_hidden_states = torch.cat((encoder_hidden_states, zeros), dim=0)
-
+        
+        
+        # image_tensor = torch.randn(2, 3, height, width, dtype=torch.float16).to('cuda')
+        # latents = self.encode_condition_image(image_tensor)
+        #  Prepare latents with width and height
+        latents_shape = (
+            2,
+            self.unet.config.in_channels,
+            height // self.vae_scale_factor,
+            width // self.vae_scale_factor
+        )
+        
+        latents = torch.randn(latents_shape, device='cuda', dtype=torch.float16)
+        
+        # zeros = encoder_hidden_states * 0
+        # encoder_hidden_states = torch.cat((encoder_hidden_states, zeros), dim=0)
+        
+        # latent_model_input = self.scheduler.scale_model_input(latents, t)
+        print(latents.shape)
+       
         for i, t in enumerate(tqdm(self.scheduler.timesteps, desc="Generating images")):
             latent_model_input = self.scheduler.scale_model_input(latents, t)
             print(latents.shape)
@@ -470,17 +488,29 @@ class Zero123PlusPipeline(diffusers.StableDiffusionPipeline):
                 ).sample
             
             latents = self.scheduler.step(noise_pred, t, latents).prev_sample
-            
+
             with torch.no_grad():
-                image = self.vae.decode(latents / 0.18215).sample
+                image = unscale_image(self.vae.decode(unscale_latents(latents) / self.vae.config.scaling_factor, return_dict=False)[0])
             
+            os.makedirs('output_dir', exist_ok = True)
+            output_path = os.path.join('output_dir', f"generated_image_{i}.png")
             image = (image / 2 + 0.5).clamp(0, 1)
             image = image.detach().cpu().permute(0, 2, 3, 1).numpy()
             images = (image * 255).round().astype("uint8")
             pil_image = Image.fromarray(images[0])
-            os.makedirs('output_dir', exist_ok = True)
-            output_path = os.path.join('output_dir', f"generated_image_{i}.png")
             pil_image.save(output_path)
+
+        latents = unscale_latents(latents)
         
-        return self.process_output(latents, output_type, return_dict)
+        if not output_type == "latent":
+            image = unscale_image(self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0])
+        else:
+            image = latents
+            
+        image = self.image_processor.postprocess(image, output_type=output_type)
+        
+        if not return_dict:
+            return (image,)
+        
+        return ImagePipelineOutput(images=image)
         
